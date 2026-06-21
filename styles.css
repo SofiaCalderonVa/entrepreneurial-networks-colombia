@@ -1,0 +1,27 @@
+h1, h2, h3 { color: #2C3E50; font-weight: bold; }
+.subtitle { color: #7f8c8d; }
+/* Cajas de métricas */
+.value-box {
+  background-color: #f8f9fa;
+  border-left: 5px solid #3498db;
+  padding: 15px;
+  margin-bottom: 20px;
+  border-radius: 5px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.value-box h3 { margin-top: 0; font-size: 1.2em; color: #7f8c8d; }
+.value-box .number { font-size: 2.5em; font-weight: bold; color: #2C3E50; }
+.positive { color: #27ae60 !important; } /* Verde */
+.negative { color: #c0392b !important; } /* Rojo */
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = FALSE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.align  = "center",
+  fig.width  = 8,        # Un poco más ancho
+  fig.height = 5,
+  dpi        = 150
+)

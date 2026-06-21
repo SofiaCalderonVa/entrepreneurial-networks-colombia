@@ -1,0 +1,1504 @@
+---
+title: "Informe estratégico de red emprendedora"
+subtitle: Análisis financiero y de perfil de red (Benchmark sectorial)
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+output:
+  html_document:
+    theme: lumen
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: false
+    code_folding: hide
+    df_print: paged
+params:
+  ego_id: "SAMPLE_EGO"
+  data_file: "data/PE601_SAMPLE.xlsx"
+---
+```{r setup-calculations, include=FALSE, cache=FALSE}
+# Paleta de Colores Unificada
+COLOR_PRIMARIO <- "#0056b3"      # Azul Oscuro Profesional
+COLOR_BENCHMARK <- "#95a5a6"     # Gris para Referencia
+COLOR_POSITIVO <- "#2ecc71"      # Verde para Buen Desempeño
+COLOR_NEGATIVO <- "#e74c3c"      # Rojo para Cuidado
+COLOR_ADVERTENCIA <- "#f39c12"  # Amarillo/Naranja para Alerta
+COLOR_FONDO <- "#f8f9fa"         # Fondo de Tarjetas
+
+# Cargar librerías
+suppressPackageStartupMessages({
+  library(readxl)
+  library(knitr)
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(tidyverse)
+  library(igraph)
+  library(ggplot2)
+  library(DT)
+  library(htmltools)
+  library(scales)
+  library(visNetwork)
+  library(kableExtra)
+  library(gridExtra)
+})
+
+# 1. CARGA DE DATOS Y SANAMIENTO
+# ----------------------------------------------------------------------
+id_objetivo <- params$ego_id
+file_attributes <- params$data_file
+emis_data_file <- "data/SAMPLE_EMIS_data.xlsx"
+emis <- read_excel(emis_data_file)
+nombre_empresa <- emis %>%
+  filter(ID == id_objetivo) %>%
+  pull(`Compañía`) %>%
+  unique()
+
+red_atributos <- readxl::read_excel(file_attributes, sheet = 1) %>%
+  filter(!is.na(Tie))
+
+# Limpieza y selección de columnas
+indicadores <- emis %>%
+  select(
+    ID,
+    roa = `Rendimiento Sobre Los Activos (ROA) (%)`,
+    roe = `Rendimiento Sobre El Patrimonio (ROE) (%)`,
+    margen_neto = `Margen Neto (%)`,
+    margen_bruto = `Margen De Ganancia Bruta (%)`,
+    margen_operativo = `Margen Operacional (%)`,
+    ganancia_neta = `Ganancia (Pérdida) Neta`,
+    razon_corriente = `Razón De Liquidez (x)`,
+    nivel_endeudamiento = `Relación Deuda/Activos Totales (%)`,
+    total_ingreso_operativo = `Total Ingreso Operativo`,
+    num_empleados = `Número de empleados`
+  ) %>%
+  mutate(across(-ID, ~ suppressWarnings(as.numeric(gsub(",", ".", as.character(.x))))))
+
+empresa_data <- indicadores %>% filter(ID == id_objetivo)
+
+# ----------------------------------------------------------------------
+# 2. CÁLCULO DE BENCHMARK (SANEADO) Y DATAFRAMES
+# ----------------------------------------------------------------------
+indicadores_saneados_limites <- indicadores %>%
+  summarise(across(.cols = -ID, .fns = list(q01 = ~quantile(.x, 0.01, na.rm = TRUE), q99 = ~quantile(.x, 0.99, na.rm = TRUE)))) %>%
+  pivot_longer(everything(), names_to = c("indicador", "percentil"), names_sep = "_q", values_to = "limite")
+
+stats_poblacion_saneada <- indicadores %>%
+  select(-ganancia_neta, -razon_corriente, -nivel_endeudamiento, -total_ingreso_operativo, -num_empleados) %>%
+  pivot_longer(-ID, names_to = "indicador", values_to = "valor") %>%
+  mutate(valor = suppressWarnings(as.numeric(valor))) %>%
+  left_join(indicadores_saneados_limites, by = "indicador") %>%
+  pivot_wider(names_from = percentil, values_from = limite, 
+              values_fn = list(limite = mean)) %>%
+  mutate(`01` = as.numeric(`01`), 
+         `99` = as.numeric(`99`)) %>%
+  filter(valor >= `01`, valor <= `99`) %>%
+  group_by(indicador) %>%
+  summarise(Promedio = mean(valor, na.rm = TRUE), .groups = "drop")
+
+empresa <- empresa_data %>%
+    select(-ID, -ganancia_neta, -razon_corriente, -nivel_endeudamiento, -num_empleados, -total_ingreso_operativo) %>%
+    pivot_longer(everything(), names_to = "indicador", values_to = "Empresa")
+
+data_grafico <- empresa %>%
+    left_join(stats_poblacion_saneada, by = "indicador") %>%
+    mutate(
+        indicador_nice = recode(indicador, roa = "ROA", roe = "ROE", margen_neto = "Mg. Neto", margen_bruto = "Mg. Bruto", margen_operativo = "Mg. Operativo"),
+        es_mejor = Empresa > Promedio
+    )
+
+# ----------------------------------------------------------------------
+# 3. CÁLCULO DE CUARTILES Y TABLA FINAL
+# ----------------------------------------------------------------------
+cuartiles <- indicadores %>%
+  select(-ganancia_neta, -razon_corriente, -nivel_endeudamiento,
+           -total_ingreso_operativo, -num_empleados) %>%
+  pivot_longer(-ID, names_to = "indicador", values_to = "valor") %>%
+  group_by(indicador) %>%
+  summarise(q1 = quantile(valor, 0.25, na.rm = TRUE), q2 = quantile(valor, 0.50, na.rm = TRUE), q3 = quantile(valor, 0.75, na.rm = TRUE))
+
+tabla_final <- data_grafico %>%
+  left_join(cuartiles, by = "indicador") %>%
+  mutate(Posición = case_when(Empresa <= q1 ~ "Q1 (Margen Bajo)", Empresa <= q2 ~ "Q2 (Debajo del Promedio)", Empresa <= q3 ~ "Q3 (Arriba del Promedio)", TRUE ~ "Q4 (Liderazgo)")) %>%
+  select(Indicador = indicador_nice, `Valor Empresa` = Empresa, `Benchmark` = Promedio, Posición) %>%
+  mutate(
+    Posición = ifelse(
+      is.na(`Valor Empresa`),
+      "NA (Sin Datos)",
+      `Posición`
+    )
+  )
+
+# ----------------------------------------------------------------------
+# 4. DEFINICIÓN DE VARIABLES PARA ANÁLISIS (TARJETAS Y TEXTO)
+# ----------------------------------------------------------------------
+val_ganancia  <- round(empresa_data$ganancia_neta, 0)
+val_rc        <- round(empresa_data$razon_corriente, 2)
+val_endeuda   <- round(empresa_data$nivel_endeudamiento, 2)
+
+col_ganancia <- ifelse(val_ganancia >= 0, COLOR_POSITIVO, COLOR_NEGATIVO)
+simbolo_ganancia <- ifelse(val_ganancia >= 0, "USD ", "-USD ")
+col_rc <- ifelse(val_rc >= 1, COLOR_POSITIVO, COLOR_NEGATIVO)
+col_endeuda <- case_when(
+  val_endeuda <= 50 ~ COLOR_POSITIVO,
+  val_endeuda <= 75 ~ COLOR_ADVERTENCIA,
+  TRUE ~ COLOR_NEGATIVO
+)
+
+# Variables para Análisis de Texto (Se mantiene el código original de extracción)
+# Función de extracción robusta: Obtiene el valor o devuelve NA si es length zero
+get_value_or_na <- function(df, ind) {
+  result <- df %>% filter(indicador == ind) %>% pull(Empresa)
+  if (length(result) == 0) {
+    return(NA_real_)
+  } else {
+    return(result)
+  }
+}
+
+# Extracción de Valores de la Empresa (roa_e, roe_e, etc.)
+roa_e <- get_value_or_na(data_grafico, "roa")
+roe_e <- get_value_or_na(data_grafico, "roe")
+mg_neto_e <- get_value_or_na(data_grafico, "margen_neto")
+mg_bruto_e <- get_value_or_na(data_grafico, "margen_bruto")
+mg_operativo_e <- get_value_or_na(data_grafico, "margen_operativo")
+
+# Extracción de Valores del Promedio (Benchmark)
+get_promedio_or_na <- function(df, ind) {
+  result <- df %>% filter(indicador == ind) %>% pull(Promedio)
+  if (length(result) == 0) {
+    return(NA_real_)
+  } else {
+    return(result)
+  }
+}
+
+roa_p <- get_promedio_or_na(data_grafico, "roa")
+roe_p <- get_promedio_or_na(data_grafico, "roe")
+mg_neto_p <- get_promedio_or_na(data_grafico, "margen_neto")
+mg_bruto_p <- get_promedio_or_na(data_grafico, "margen_bruto")
+mg_operativo_p <- get_promedio_or_na(data_grafico, "margen_operativo")
+
+
+# Extracción de Posición (Q) con Manejo de NA
+if (is.na(roa_e)) { roa_q <- NA } else { roa_q <- tabla_final %>% filter(Indicador == "ROA") %>% pull(Posición) }
+if (is.na(roe_e)) { roe_q <- NA } else { roe_q <- tabla_final %>% filter(Indicador == "ROE") %>% pull(Posición) }
+if (is.na(mg_bruto_e)) { mg_bruto_q <- NA } else { mg_bruto_q <- tabla_final %>% filter(Indicador == "Mg. Bruto") %>% pull(Posición) }
+if (is.na(mg_operativo_e)) { mg_operativo_q <- NA } else { mg_operativo_q <- tabla_final %>% filter(Indicador == "Mg. Operativo") %>% pull(Posición) }
+if (is.na(mg_neto_e)) { mg_neto_q <- NA } else { mg_neto_q <- tabla_final %>% filter(Indicador == "Mg. Neto") %>% pull(Posición) }
+# ----------------------------------------------------------------------
+# 5. CÁLCULO DE MÉTRICAS DE COMPOSICIÓN (SU RED)
+# ----------------------------------------------------------------------
+n_lazos <- nrow(red_atributos)
+
+# A. Composición Familiar (%)
+val_familiares_n <- red_atributos %>%
+  mutate(es_familiar = coalesce(`Close family`, 0) + coalesce(`Distant family`, 0)) %>%
+  summarise(total_familiares = sum(es_familiar, na.rm = TRUE)) %>%
+  pull(total_familiares)
+
+val_familiares_pct <- round((val_familiares_n / n_lazos) * 100, 2)
+
+# B. Composición de Género (%)
+val_hombres_n <- red_atributos %>% filter(Gender == 1) %>% nrow()
+val_mujeres_n <- red_atributos %>% filter(Gender == 2) %>% nrow()
+
+val_hombres_pct <- round((val_hombres_n / n_lazos) * 100, 2)
+val_mujeres_pct <- round((val_mujeres_n / n_lazos) * 100, 2)
+
+# C. Edad de los Lazos (Time known)
+val_media_edad <- round(mean(red_atributos$`Time known`, na.rm = TRUE), 2)
+val_sd_edad <- round(sd(red_atributos$`Time known`, na.rm = TRUE), 2)
+
+# D. Alcance Geográfico (Residence)
+alcance_red <- red_atributos %>%
+  group_by(Residence) %>%
+  summarise(n = n(), .groups = 'drop') %>%
+  mutate(
+    Alcance = case_when(
+      Residence == 1 ~ "Local",
+      Residence == 2 ~ "Regional",
+      Residence == 3 ~ "Nacional",
+      Residence == 4 ~ "Internacional",
+      TRUE ~ "Otro"
+    ),
+    `Porcentaje (%)` = round((n / n_lazos) * 100, 2)
+  ) %>%
+  filter(Alcance != "Otro") %>%
+  select(Alcance, `Porcentaje (%)`)
+
+# Definición de variables para el análisis de Fuerza de Lazos
+val_media_cercania <- round(mean(red_atributos$Closeness, na.rm = TRUE), 2)
+val_media_confianza <- round(mean(red_atributos$Trust, na.rm = TRUE), 2)
+val_media_comunicacion <- round(mean(red_atributos$`Communication frequency`, na.rm = TRUE), 2)
+
+# Benchmarks para Fuerza de Lazos
+bench_cercania <- 4
+bench_confianza <- 4.5
+bench_comunicacion <- 3.8
+```
+```{r setup-visualizations, include=FALSE, cache=FALSE}
+# ----------------------------------------------------------------------
+# 1. FUNCIÓN PARA GENERAR TARJETAS (Estilo unificado con colores fijos)
+# ----------------------------------------------------------------------
+generar_tarjetas <- function() {
+  boxes_html <- div(
+    style = "display: flex; gap: 20px; margin-bottom: 30px; justify-content: space-between;",
+    div(style = paste0("background:", COLOR_FONDO, "; padding:15px; border-left:5px solid ", COLOR_PRIMARIO, "; border-radius:5px; width:30%; box-shadow:0 2px 5px rgba(0,0,0,0.1);"),
+        tags$h4("UTILIDAD NETA (ABSOLUTA)", style="margin:0; color:#495057; font-size:0.8em; font-weight:700;"),
+        div(paste0(simbolo_ganancia, format(abs(val_ganancia), big.mark = ",")), style=paste0("font-size:2.2em; font-weight:bold; color:", col_ganancia, "; margin-top: 5px;"))
+    ),
+    div(style = paste0("background:", COLOR_FONDO, "; padding:15px; border-left:5px solid ", COLOR_PRIMARIO, "; border-radius:5px; width:30%; box-shadow:0 2px 5px rgba(0,0,0,0.1);"),
+        tags$h4("RAZÓN DE LIQUIDEZ CORRIENTE (X)", style="margin:0; color:#495057; font-size:0.8em; font-weight:700;"),
+        div(paste0(val_rc, "x"), style=paste0("font-size:2.2em; font-weight:bold; color:", col_rc, "; margin-top: 5px;"))
+    ),
+    div(style = paste0("background:", COLOR_FONDO, "; padding:15px; border-left:5px solid ", COLOR_PRIMARIO, "; border-radius:5px; width:30%; box-shadow:0 2px 5px rgba(0,0,0,0.1);"),
+        tags$h4("NIVEL DE APALANCAMIENTO (%)", style="margin:0; color:#495057; font-size:0.8em; font-weight:700;"),
+        div(paste0(val_endeuda, "%"), style=paste0("font-size:2.2em; font-weight:bold; color:", col_endeuda, "; margin-top: 5px;"))
+    )
+  )
+  return(boxes_html)
+}
+
+# (Otras funciones de visualización financiera se mantienen igual)
+generar_lollipop <- function() {
+  g <- ggplot(data_grafico) +
+    geom_segment(aes(x = reorder(indicador_nice, Empresa), xend = indicador_nice, y = Promedio, yend = Empresa), color = COLOR_BENCHMARK, linewidth = 1.2) +
+    geom_point(aes(x = indicador_nice, y = Promedio), color = COLOR_BENCHMARK, size = 4) +
+    geom_point(aes(x = indicador_nice, y = Empresa, color = es_mejor), size = 6) +
+    geom_text(aes(x = indicador_nice, y = Empresa, label = round(Empresa, 1)), color = "white", size = 2.5, fontface = "bold") +
+    scale_color_manual(values = c("FALSE" = COLOR_NEGATIVO, "TRUE" = COLOR_POSITIVO), labels = c("Inferior al Benchmark", "Superior al Benchmark")) +
+    coord_flip() +
+    theme_minimal(base_size = 12) + 
+    labs(
+      title = paste("Rentabilidad de", nombre_empresa),
+      subtitle = "Comparación de Indicadores Clave vs. el Benchmark del Sector",
+      x = NULL, y = "Porcentaje (%)", color = "Desempeño Competitivo"
+    ) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.major.y = element_blank(),
+      plot.title = element_text(face = "bold", color = COLOR_PRIMARIO, hjust = 0.5), 
+      plot.subtitle = element_text(hjust = 0.5),
+      axis.title.x = element_text(margin = margin(t = 10))
+    )
+  return(g)
+}
+
+generar_tabla <- function() {
+  dt <- datatable(
+    tabla_final,
+    rownames = FALSE,
+    options = list(dom = 't', paging = FALSE, autoWidth = TRUE, columnDefs = list(list(width = '100px', targets = c(0, 3)))),
+    colnames = c("Indicador", "Valor Empresa", "Promedio Saneado", "Posición")
+  ) %>%
+    formatStyle(
+      'Posición',
+      backgroundColor = styleEqual(
+        c("Q1 (Margen Bajo)", "Q2 (Debajo del Promedio)", "Q3 (Arriba del Promedio)", "Q4 (Liderazgo)", "NA (Sin Datos)"),
+        c('#ffcdd2', '#ffe0b2', '#c8e6c9', '#4CAF50', '#EEEEEE')
+      ),
+      fontWeight = 'bold'
+    ) %>%
+    formatRound(columns = c('Valor Empresa', 'Benchmark'), digits = 2)
+  return(dt)
+}
+
+# ----------------------------------------------------------------------
+# 4. SETUP DE VARIABLES Y DATA FRAME PARA GRÁFICOS DE RED
+# ----------------------------------------------------------------------
+
+# --- DEFINICIÓN DE BENCHMARKS GLOBALES DE RED ---
+bench_familiares_pct <- 50
+bench_hombres_pct <- 50
+bench_media_edad <- 14
+bench_sd_edad <- 6
+
+# Benchmark Geográfico
+bench_alcance_df <- tibble(
+  Alcance = factor(c("Internacional", "Local", "Nacional", "Regional"),
+                   levels = c("Internacional", "Local", "Nacional", "Regional")),
+  `Porcentaje (%)` = c(15, 35, 25, 25)
+)
+
+# Unión con Benchmark para el gráfico Alcance Geográfico
+alcance_grafico <- full_join(alcance_red, bench_alcance_df, by = "Alcance", suffix = c("_Usted", "_Ref")) %>%
+  pivot_longer(cols = starts_with("Porcentaje"), names_to = "Tipo", values_to = "Valor") %>%
+  mutate(
+    Tipo = ifelse(grepl("Usted", Tipo), "Usted", "Referencia"),
+    Valor = coalesce(Valor, 0)
+  )
+  
+# --- DATAFRAMES PARA NUEVOS GRÁFICOS DE COMPOSICIÓN ---
+# 4.1 Composición Familiar 
+familiar_grafico <- tibble(
+  Métrica = c("Lazos Familiares", "Benchmark (Máx. Recomendado)"),
+  Porcentaje = c(val_familiares_pct, bench_familiares_pct)
+) %>%
+  mutate(
+    Color = ifelse(Métrica == "Lazos Familiares", COLOR_PRIMARIO, COLOR_BENCHMARK), # <-- CAMBIO AQUI
+    Orden = ifelse(Métrica == "Lazos Familiares", 2, 1) 
+  ) %>%
+  arrange(Orden)
+
+# 4.2 Composición de Género
+genero_grafico <- tibble(
+  Métrica = c("Hombres", "Mujeres"),
+  Porcentaje = c(val_hombres_pct, val_mujeres_pct)
+) %>%
+  mutate(
+    Color = c(COLOR_PRIMARIO, COLOR_NEGATIVO)
+  )
+
+# 4.3 Antigüedad de Lazos 
+edad_grafico <- tibble(
+  Métrica = c("Antigüedad Promedio (Años)", "Benchmark (Años)"),
+  Valor = c(val_media_edad, bench_media_edad)
+) %>%
+  mutate(
+    Color = c(COLOR_PRIMARIO, COLOR_BENCHMARK) 
+  )
+
+
+# ----------------------------------------------------------------------
+# 5. NUEVAS FUNCIONES PARA GRÁFICOS DE RED
+# ----------------------------------------------------------------------
+
+# 5.1 FUNCIÓN PARA GRÁFICO DE COMPOSICIÓN FAMILIAR
+generar_familiar_plot <- function() {
+  ggplot(familiar_grafico, aes(x = reorder(Métrica, -Orden), y = Porcentaje, fill = Métrica)) +
+    geom_bar(stat = "identity", width = 0.5, position = position_dodge(width = 0.8)) +
+    geom_text(aes(label = paste0(Porcentaje, "%")), vjust = -0.5, size = 4, fontface = "bold") +
+    scale_fill_manual(values = setNames(familiar_grafico$Color, familiar_grafico$Métrica)) +
+    labs(
+      title = "Proporción Familiar", # Título corto
+      subtitle = "Comparación con el valor de referencia",
+      y = "Porcentaje (%)",
+      x = NULL,
+      fill = NULL
+    ) +
+    scale_y_continuous(limits = c(0, max(familiar_grafico$Porcentaje) * 1.1)) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(face = "bold", color = COLOR_PRIMARIO, hjust = 0.5)
+    )
+}
+
+# 5.2 FUNCIÓN PARA GRÁFICO DE COMPOSICIÓN DE GÉNERO
+generar_genero_plot <- function() {
+  ggplot(genero_grafico, aes(x = "", y = Porcentaje, fill = Métrica)) +
+    geom_bar(stat = "identity", width = 1) +
+    coord_polar("y", start = 0) +
+    geom_text(aes(label = paste0(Métrica, " (", Porcentaje, "%)")), 
+              position = position_stack(vjust = 0.5), size = 3, color = "white", fontface = "bold") +
+    scale_fill_manual(values = setNames(genero_grafico$Color, genero_grafico$Métrica)) +
+    labs(
+      title = "Composición de Género",
+      x = NULL,
+      y = NULL,
+      fill = NULL
+    ) +
+    theme_void(base_size = 12) +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(face = "bold", color = COLOR_PRIMARIO, hjust = 0.5)
+    )
+}
+
+# 5.3 FUNCIÓN PARA GRÁFICO DE ANTIGÜEDAD DE LAZOS (CORRECCIÓN DE EJE Y Y MARGEN)
+generar_edad_plot <- function() {
+  ggplot(edad_grafico, aes(x = Métrica, y = Valor, fill = Métrica)) +
+    geom_bar(stat = "identity", width = 0.5, position = position_dodge(width = 0.8)) +
+    geom_text(aes(label = round(Valor, 1)), vjust = -0.5, size = 4, fontface = "bold") +
+    scale_fill_manual(values = setNames(edad_grafico$Color, edad_grafico$Métrica)) +
+    labs(
+      title = "Antigüedad Promedio", # Título corto
+      subtitle = "Comparación con el promedio de referencia",
+      y = "Años", 
+      x = NULL,
+      fill = NULL
+    ) +
+    scale_y_continuous(limits = c(0, max(edad_grafico$Valor) * 1.1)) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(face = "bold", color = COLOR_PRIMARIO, hjust = 0.5),
+      plot.margin = unit(c(5, 5, 5, 5), "mm")
+    )
+}
+
+
+# Functions defined above are available in subsequent chunks
+```
+```{r emis-setup-final-corrected, echo=FALSE, include=FALSE}
+# Se mantiene el código de cálculo de Empleados y Ventas
+val_empleados <- as.numeric(empresa_data$num_empleados)
+bench_empleados <- 34 # Valor de referencia
+val_ventas <- as.numeric(empresa_data$total_ingreso_operativo)
+bench_ventas <- 8732 # Valor de referencia
+val_ratio_ventas <- val_ventas / bench_ventas
+
+# Preparamos los datos para el gráfico de comparación
+emis <- tibble(
+  Métrica = c("Ventas (Unidad Base)", "Empleados (N)"),
+  Usted = c(val_ventas, val_empleados),
+  Referencia = c(bench_ventas, bench_empleados)
+) %>%
+  pivot_longer(cols = c(Usted, Referencia), names_to = "Tipo", values_to = "Valor")
+```
+
+# **`r nombre_empresa`**
+El presente informe de análisis financiero y estratégico tiene un objetivo dual: evaluar la posición financiera de su compañía, utilizando datos comparativos extraídos de la base de datos EMIS, y diagnosticar la efectividad de su red profesional.
+
+En el aspecto financiero, el análisis se centra en la solidez financiera (liquidez y endeudamiento) y la rentabilidad competitiva, comparando el desempeño frente al benchmark del sector y la posición por cuartiles.
+
+En el aspecto estratégico, se evalúa su red profesional a través de métricas clave como la fuerza de los lazos, la densidad y la restricción. Sus resultados se contrastan con un grupo de referencia sectorial (empresas de 20 a 100 empleados de su área) para una interpretación objetiva.
+
+Los puntajes aquí presentados son una herramienta de diagnóstico de alto valor para la toma de decisiones estratégicas, y deben ser interpretados a la luz de su situación personal y profesional específica.
+
+## Caracteristicas de la compañía 
+Esta sección marca el inicio del análisis de la escala operativa de la compañía, examinando su tamaño y su capacidad de generación de ingresos en comparación con el grupo de referencia del sector.
+
+El enfoque se centra en dos métricas clave de la data EMIS: el total de ingreso operativo (ventas) y el número de empleados. La comparación de estos valores absolutos con el benchmark del sector permite determinar si la compañía opera a una escala mayor, menor o similar a sus pares, proporcionando una base fundamental para interpretar su estrategia de mercado y el manejo de su capital humano.
+
+```{r emis-sales-graph, echo=FALSE, warning=FALSE}
+emis_ventas <- emis %>% filter(Métrica == "Ventas (Unidad Base)")
+
+ggplot(emis_ventas, aes(x = Métrica, y = Valor, fill = Tipo)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.5) +
+  geom_text(aes(label = format(round(Valor, 0), big.mark = ",", decimal.mark = ".")),
+            position = position_dodge(width = 0.8),
+            vjust = -0.5, size = 3, fontface = "bold") +
+  scale_y_continuous(labels = scales::comma, limits = c(0, max(emis_ventas$Valor) * 1.25)) +
+  labs(
+    title = "Total Ingreso Operativo vs. Benchmark",
+    x = "",
+    y = "Total Ingreso Operativo (USD)",
+    fill = ""
+  ) +
+  scale_fill_manual(values = c("Usted" = COLOR_PRIMARIO, "Referencia" = COLOR_BENCHMARK)) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", axis.text.x = element_blank(),
+        plot.title = element_text(face = "bold", color = COLOR_PRIMARIO, hjust = 0.5))
+```
+```{r emis-employees-graph, echo=FALSE, warning=FALSE}
+emis_empleados <- emis %>% filter(Métrica == "Empleados (N)")
+
+ggplot(emis_empleados, aes(x = Métrica, y = Valor, fill = Tipo)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.5) +
+  geom_text(aes(label = format(round(Valor, 0), big.mark = ",", decimal.mark = ".")),
+            position = position_dodge(width = 0.8),
+            vjust = -0.5, size = 3, fontface = "bold") +
+  scale_y_continuous(limits = c(0, max(emis_empleados$Valor, na.rm=TRUE) * 1.3)) +
+  labs(
+    title = "Número de Empleados vs. Benchmark",
+    x = "",
+    y = "Número de Empleados (N)",
+    fill = ""
+  ) +
+  scale_fill_manual(values = c("Usted" = COLOR_PRIMARIO, "Referencia" = COLOR_BENCHMARK)) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", axis.text.x = element_blank(),
+        plot.title = element_text(face = "bold", color = COLOR_PRIMARIO, hjust = 0.5))
+```
+```{r financial-operational-analysis, echo=FALSE, warning=FALSE, results='asis'}
+val_ventas_safe <- coalesce(empresa_data$total_ingreso_operativo, 0)
+val_empleados_safe <- coalesce(empresa_data$num_empleados, 0)
+
+cat('A continuación, se presenta un análisis de la escala operativa de la empresa:\n\n')
+
+# ----------------------------------------------------------------------
+# 1. ANÁLISIS DE INGRESO OPERATIVO (VENTAS)
+# ----------------------------------------------------------------------
+ventas_diferencia <- val_ventas_safe - bench_ventas
+ventas_estado <- ifelse(ventas_diferencia > 0, "superiores", "inferiores")
+ventas_porcentaje <- ifelse(bench_ventas != 0, abs(round((val_ventas_safe / bench_ventas) * 100 - 100, 1)), 100)
+
+ventas_texto <- paste0(
+  "* **Total Ingreso Operativo (Ventas):** Los ingresos de la empresa (**", format(round(val_ventas_safe, 0), big.mark = ","), " USD**) son ",
+  ventas_estado, " en un **", ventas_porcentaje, "%** respecto al benchmark sectorial. ",
+  ifelse(ventas_diferencia > 0,
+          "Esta diferencia posiciona a la compañía como líder en generación de ingresos, indicando un excelente desempeño comercial.",
+          "Esta diferencia sugiere que la empresa opera a una **escala de ingresos inferior** a la de sus pares, lo que representa una **oportunidad clave para escalar la facturación**.")
+)
+cat(ventas_texto, "\n")
+
+# ----------------------------------------------------------------------
+# 2. ANÁLISIS DE NÚMERO DE EMPLEADOS
+# ----------------------------------------------------------------------
+if (is.na(empresa_data$num_empleados) || val_empleados_safe == 0) {
+  empleados_texto <- paste0(
+    "* **Número de Empleados:** Actualmente, no se dispone de información para el **Número de Empleados**, impidiendo la comparación directa con el promedio sectorial de ", format(round(bench_empleados, 0), big.mark = ","), " empleados. ",
+    "Se recomienda la obtención de este dato para evaluar la **Productividad por Empleado**."
+  )
+} else {
+  empleados_diferencia <- val_empleados_safe - bench_empleados
+  empleados_estado <- ifelse(empleados_diferencia > 0, "mayor", "menor")
+
+  empleados_texto <- paste0(
+    "* **Número de Empleados:** La empresa cuenta con **", format(round(val_empleados_safe, 0), big.mark = ","), " empleados**, lo cual es **", empleados_estado,
+    "** al promedio sectorial de ", format(round(bench_empleados, 0), big.mark = ","), " empleados. ",
+    "Esta métrica es crucial para determinar la **Productividad por Empleado** y la eficiencia operativa."
+  )
+}
+
+cat(empleados_texto, "\n")
+```
+
+## Análisis financiero
+Esta sección evalúa la **solidez financiera** y la **rentabilidad competitiva** de **`r nombre_empresa`**.
+
+### Resumen ejecutivo
+Las tarjetas resumen la capacidad de la empresa para generar ganancias y afrontar obligaciones.
+```{r 1-display-tarjetas, echo=FALSE, warning=FALSE, results='asis'}
+generar_tarjetas()
+```
+```{r tarjetas-insights, echo=FALSE, warning=FALSE, results='asis'}
+cat('La revisión de las métricas de solidez muestran:\n\n')
+
+# Utilidad Neta
+if (is.na(val_ganancia)) {
+  cat('* **Utilidad Neta:** No hay información disponible para este indicador. El valor es **NA**.\n')
+} else {
+  cat(paste0('* **Utilidad Neta:** El resultado final de **', simbolo_ganancia, format(abs(val_ganancia), big.mark = ","),
+             '** indica que la empresa ha generado **', ifelse(val_ganancia >= 0, 'utilidades sólidas', 'pérdidas'),
+             '** en el periodo.\n'))
+}
+
+# Liquidez (Razón Corriente)
+if (is.na(val_rc)) {
+  cat('* **Liquidez (Razón Corriente):** No hay información disponible para este indicador. El valor es **NA**.\n')
+} else {
+  liquidez_estado <- ifelse(val_rc >= 1, 'fuerte', 'débil')
+  cat(paste0('* **Liquidez (Razón Corriente):** Un ratio de **', val_rc, 'x** es **',
+             ifelse(val_rc >= 1, 'saludable y superior a la unidad', 'insuficiente'),
+             '**. Esto demuestra una **', liquidez_estado,
+             '** capacidad de cubrir obligaciones a corto plazo.\n'))
+}
+
+# Apalancamiento (Endeudamiento)
+if (is.na(val_endeuda)) {
+  cat('* **Apalancamiento (Endeudamiento):** No hay información disponible para este indicador. El valor es **NA**.\n')
+} else {
+  apalancamiento_estado <- case_when(val_endeuda <= 50 ~ 'moderado y seguro', val_endeuda <= 75 ~ 'gestionable', TRUE ~ 'alto y riesgoso')
+  cat(paste0('* **Apalancamiento (Endeudamiento):** Con un **', val_endeuda, '%** de activos financiados con deuda, la empresa presenta un nivel de apalancamiento **',
+             apalancamiento_estado, '**.\n'))
+}
+```
+
+### Posición competitiva en rentabilidad
+```{r 1-display-lollipop, echo=FALSE, warning=FALSE, results='asis'}
+generar_lollipop()
+```
+```{r lollipop-insights, echo=FALSE, warning=FALSE, results='asis'}
+cat('\n')
+
+# ----------------------------------------------------------------------
+# 1. ROA (Rendimiento sobre Activos)
+# ----------------------------------------------------------------------
+if (is.na(roa_e) | is.na(roa_p)) {
+  # Caso de datos faltantes
+  cat('1. **ROA (Rendimiento sobre Activos):** No hay información suficiente para comparar el ROA.\n\n')
+} else {
+  comp_roa <- ifelse(roa_e > roa_p, 'fuerte y **Superior**', 'moderado e **Inferior**')
+  gestion_roa <- ifelse(roa_e > roa_p, 
+                        'una excelente gestión del capital invertido y alta eficiencia en la conversión de activos a utilidades operacionales. Mantiene una **ventaja competitiva** en la eficiencia del uso de recursos.', 
+                        'una **oportunidad para reevaluar la rotación de activos** y optimizar la inversión de capital para igualar la eficiencia promedio del sector. El enfoque debe estar en aumentar las ventas por activo.')
+  
+  cat(paste0('1. **ROA (Rendimiento sobre Activos):** El retorno sobre activos de ', round(roa_e, 2), '% es ', comp_roa, ' (Benchmark: ', round(roa_p, 2), '%). Esto indica ', gestion_roa, '\n\n'))
+}
+
+# ----------------------------------------------------------------------
+# 2. ROE (Retorno sobre Patrimonio)
+# ----------------------------------------------------------------------
+if (is.na(roe_e) | is.na(roe_p)) {
+  cat('2. **ROE (Retorno sobre Patrimonio):** No hay información suficiente para comparar el ROE.\n\n')
+} else {
+  comp_roe <- ifelse(roe_e > roe_p, 'Excepcional y **Superior**', 'Vulnerable e **Inferior**')
+  atractivo_roe <- ifelse(roe_e > roe_p, 
+                          'un **alto atractivo para el capital accionario**, superando significativamente las expectativas del sector. La empresa está maximizando el valor para sus dueños y accionistas.', 
+                          'una necesidad de mejorar la rentabilidad neta o de **optimizar el apalancamiento financiero** para ofrecer un mejor retorno al patrimonio. La rentabilidad actual podría desincentivar la inversión.')
+  
+  cat(paste0('2. **ROE (Retorno sobre Patrimonio):** La rentabilidad para el accionista de ', round(roe_e, 2), '% es ', comp_roe, ' en comparación al promedio (', round(roe_p, 2), '%). Esto confirma ', atractivo_roe, '. \n\n'))
+}
+
+# ----------------------------------------------------------------------
+# 3. MARGEN BRUTO
+# ----------------------------------------------------------------------
+if (is.na(mg_bruto_e) | is.na(mg_bruto_p)) {
+  cat('3. **Margen Bruto:** No hay información suficiente para analizar la eficiencia en el costo de ventas frente al mercado.\n\n')
+} else {
+  comp_mb <- ifelse(mg_bruto_e > mg_bruto_p, 'Saludable y **Superior**', 'Bajo e **Inferior**')
+  conclusion_mb <- ifelse(mg_bruto_e > mg_bruto_p, 
+                          'una **fuerte ventaja competitiva** en costos directos (COGS) o un excelente poder de fijación de precios en el mercado. Esta es una base sólida para la rentabilidad operativa.', 
+                          'una **presión alta en los costos de producción** (COGS) o una limitación en el poder de precios, lo que requiere una **revisión crítica de la cadena de suministro** y negociación con proveedores.')
+  
+  cat(paste0('3. **Margen Bruto:** La eficiencia de costos directos de ', round(mg_bruto_e, 2), '% es ', comp_mb, ' (Benchmark: ', round(mg_bruto_p, 2), '%). Esto sugiere ', conclusion_mb, '. \n\n'))
+}
+
+# ----------------------------------------------------------------------
+# 4. MARGEN OPERATIVO
+# ----------------------------------------------------------------------
+if (is.na(mg_operativo_e) | is.na(mg_operativo_p)) {
+  cat('4. **Margen Operativo:** No hay información suficiente para analizar la capacidad del negocio central para generar ganancias.\n\n')
+} else {
+  comp_mo <- ifelse(mg_operativo_e > mg_operativo_p, 'Robusto y **Superior**', 'Limitado e **Inferior**')
+  conclusion_mo <- ifelse(mg_operativo_e > mg_operativo_p, 
+                          'un **control estricto de los gastos administrativos y de ventas** (GAV), permitiendo al *core business* generar utilidades sólidas y sostenibles antes de intereses e impuestos.', 
+                          'una **erosión significativa de la rentabilidad** debido a altos gastos operativos (GAV), indicando una **necesidad urgente de eficiencia** en áreas administrativas o comerciales para igualar al sector.')
+  
+  cat(paste0('4. **Margen Operativo:** El rendimiento del negocio central de ', round(mg_operativo_e, 2), '% es ', comp_mo, ' (Benchmark: ', round(mg_operativo_p, 2), '%). Esto demuestra ', conclusion_mo, '. \n\n'))
+}
+
+# ----------------------------------------------------------------------
+# 5. MARGEN NETO
+# ----------------------------------------------------------------------
+if (is.na(mg_neto_e) | is.na(mg_neto_p)) {
+  cat('5. **Margen Neto:** No hay información suficiente para analizar la utilidad final después de todos los costos.\n\n')
+} else {
+  comp_mn <- ifelse(mg_neto_e > mg_neto_p, 'Eficaz y **Superior**', 'Vulnerable e **Inferior**')
+  conclusion_mn <- ifelse(mg_neto_e > mg_neto_p, 
+                          'una **gestión efectiva del resultado final**, incluyendo costos financieros e impuestos, maximizando el beneficio para los propietarios de la empresa.', 
+                          'que los **costos no operativos** (intereses, impuestos o partidas extraordinarias) están absorbiendo la rentabilidad operativa, dejando una utilidad final inferior a la de sus pares. Se sugiere revisar la carga financiera.')
+  
+  cat(paste0('5. **Margen Neto:** La utilidad final de ', round(mg_neto_e, 2), '% es ', comp_mn, ' (Benchmark: ', round(mg_neto_p, 2), '%). Esto sugiere ', conclusion_mn, '. \n\n'))
+}
+```
+
+### Tabla de posicionamiento por cuartiles
+La tabla muestra la posición de la empresa dentro de la distribución total del sector (Q1-Q4).
+```{r 5-display-table, echo=FALSE, fig.height=6, warning=FALSE}
+generar_tabla()
+```
+```{r table-insights, echo=FALSE, results='asis'}
+interpretar_cuartil <- function(cuartil) {
+  if (is.na(cuartil) || cuartil == "" || grepl("NA", cuartil)) {
+    return("Posición No Clasificada")
+  } else if (grepl("Q4", cuartil)) {
+    return("Liderazgo Competitivo (Top 25%)")
+  } else if (grepl("Q3", cuartil)) {
+    return("Posicionamiento Sólido (50% - 75%)")
+  } else if (grepl("Q2", cuartil)) {
+    return("En Línea con la Media (25% - 50%)")
+  } else if (grepl("Q1", cuartil)) {
+    return("Brecha Competitiva (Bottom 25%)")
+  } else {
+    return("Posición No Clasificada")
+  }
+}
+
+# --- Definición de Insights Específicos por Cuartil y por Indicador ---
+
+generar_insight_ejecutivo <- function(indicador, cuartil) {
+  # Manejo de NA
+  if (is.na(cuartil) || cuartil == "" || grepl("NA", cuartil)) {
+    return("No hay información de cuartil disponible para una evaluación comparativa.")
+  }
+
+  q_val <- cuartil # Para simplificar las referencias
+
+  # ----------------------------------------------------------------------
+  # A. ROA (Rendimiento sobre Activos)
+  # ----------------------------------------------------------------------
+  if (indicador == "ROA") {
+    if (grepl("Q4|Q3", q_val)) {
+      return(paste0("El alto posicionamiento indica una **ejecución eficiente superior** a la media sectorial en la conversión de **activos a utilidades**. La estrategia debe centrarse en mantener esta alta rotación y gestión de activos."))
+    } else if (grepl("Q2", q_val)) {
+      return(paste0("La posición media sugiere que la **eficiencia en el uso de activos** está al nivel del competidor promedio. Existe una clara oportunidad para **mejorar la rotación** y salir del Q2."))
+    } else { # Q1
+      return(paste0("La posición de **Brecha Competitiva** demanda una **revisión urgente de la inversión en activos** o de la capacidad de generar ventas a partir de ellos, ya que el rendimiento es significativamente inferior."))
+    }
+  }
+  
+  # ----------------------------------------------------------------------
+  # B. ROE (Retorno sobre Patrimonio)
+  # ----------------------------------------------------------------------
+  if (indicador == "ROE") {
+    if (grepl("Q4|Q3", q_val)) {
+      return(paste0("Un **fuerte retorno para los accionistas**, indicando una excelente combinación de rentabilidad y **apalancamiento financiero**. La empresa está maximizando el valor para sus propietarios, superando al 50% del sector."))
+    } else if (grepl("Q2", q_val)) {
+      return(paste0("La rentabilidad del patrimonio está **alineada con el promedio**. Se debe evaluar la composición del **apalancamiento** y el margen neto para impulsar el ROE hacia cuartiles superiores."))
+    } else { # Q1
+      return(paste0("La baja rentabilidad para los accionistas (**Brecha Competitiva**) es una señal de alarma. Es necesaria una **reestructuración financiera y operativa** para generar un retorno atractivo para el capital accionario."))
+    }
+  }
+
+  # ----------------------------------------------------------------------
+  # C. Margen Bruto
+  # ----------------------------------------------------------------------
+  if (indicador == "Mg. Bruto") {
+    if (grepl("Q4|Q3", q_val)) {
+      return(paste0("El **margen es sólido**, sugiriendo una fuerte **ventaja en costos directos (COGS)** o un poder superior de fijación de precios. Esto es un pilar fundamental de la rentabilidad."))
+    } else if (grepl("Q2", q_val)) {
+      return(paste0("La posición media indica que los **costos de producción (COGS)** están controlados al nivel promedio del sector. Se recomienda buscar **mejores eficiencias** o negociación de volumen para ganar ventaja."))
+    } else { # Q1
+      return(paste0("La **Brecha Competitiva** refleja una presión de costos directos (COGS) inaceptable. Se requiere una **auditoría inmediata de la cadena de suministro y Costo de Ventas** para recuperar la paridad."))
+    }
+  }
+
+  # ----------------------------------------------------------------------
+  # D. Margen Operativo
+  # ----------------------------------------------------------------------
+  if (indicador == "Mg. Operativo") {
+    if (grepl("Q4|Q3", q_val)) {
+      return(paste0("La **eficiencia operativa es superior**, demostrando un **control estricto sobre los Gastos de Administración y Ventas (GAV)**. El *core business* está generando utilidades de manera sobresaliente."))
+    } else if (grepl("Q2", q_val)) {
+      return(paste0("El desempeño operativo es **promedio**. La estrategia debe ser optimizar procesos y **reducir gastos fijos (GAV)** para transformar este cuartil en una ventaja competitiva."))
+    } else { # Q1
+      return(paste0("La **erosión de la rentabilidad operativa** es crítica. Se necesita una **reingeniería profunda de los GAV** para eliminar ineficiencias y alcanzar un margen que sustente el negocio central."))
+    }
+  }
+  
+  # ----------------------------------------------------------------------
+  # E. Margen Neto
+  # ----------------------------------------------------------------------
+  if (indicador == "Mg. Neto") {
+    if (grepl("Q4|Q3", q_val)) {
+      return(paste0("El **resultado final es excepcional**. Esto confirma una **gestión financiera y fiscal efectiva**, maximizando la utilidad que queda para los propietarios después de todos los gastos."))
+    } else if (grepl("Q2", q_val)) {
+      return(paste0("La utilidad neta es **consistente con el promedio**. La atención debe centrarse en la **optimización de costos no operativos** (intereses/impuestos) y asegurar que el margen operativo se traduzca mejor en margen final."))
+    } else { # Q1
+      return(paste0("La **utilidad final es vulnerable**. A pesar de los márgenes superiores (si los hubiera), los **costos financieros o fiscales** están absorbiendo la rentabilidad. Se requiere una **revisión estratégica de la carga no operativa**."))
+    }
+  }
+  
+  # Default si el indicador no coincide
+  return(paste0("Se encontró el cuartil ", cuartil, ", pero el indicador no está mapeado para un análisis profundo."))
+}
+
+
+# --- Ejecución y Presentación del Análisis ---
+indicadores_q <- list(
+  ROA = roa_q, ROE = roe_q,
+  'Mg. Bruto' = mg_bruto_q,
+  'Mg. Operativo' = mg_operativo_q,
+  'Mg. Neto' = mg_neto_q
+)
+
+for (nombre in names(indicadores_q)) {
+  q_val <- indicadores_q[[nombre]]
+  
+  if (is.na(q_val) || q_val == "" || grepl("NA", q_val)) {
+    cat(paste0('* **', nombre, ':** ', '**Falta Información** para este indicador.\n'))
+  } else {
+    descripcion_cuartil <- interpretar_cuartil(q_val)
+    conclusion_ejecutiva <- generar_insight_ejecutivo(nombre, q_val)
+
+    # Presentación final: * **Indicador (Descripción Cuartil):** Conclusión ejecutiva.
+    cat(paste0('* **', nombre, ' (', descripcion_cuartil, '):** ', conclusion_ejecutiva, '\n'))
+  }
+}
+```
+
+## Análisis de red profesional
+La segunda parte de este informe se enfoca en el diagnóstico de su red profesional, analizando sus características estructurales y su potencial estratégico.
+
+### Composición de red
+Esta sección describe la estructura fundamental de su red profesional: familiaridad, género, alcance geográfico y edad promedio de los lazos.
+
+#### Alcance geográfico de la red
+Este gráfico muestra dónde están ubicados sus contactos en comparación con la red de referencia.
+
+```{r net-alcance-plot, fig.height=4.5, fig.width=8, echo=FALSE, warning=FALSE}
+ggplot(alcance_grafico, aes(x = Alcance, y = Valor, fill = Tipo)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = paste0(round(Valor, 1), "%")),
+            position = position_dodge(width = 0.8), vjust = -0.5, size = 3, fontface = "bold") +
+  labs(
+    title = "Distribución geográfica de contactos",
+    subtitle = "Comparación vs. Red de Referencia (%)",
+    x = NULL,
+    y = "Porcentaje de Lazos (%)",
+    fill = ""
+  ) +
+  scale_fill_manual(values = c("Usted" = COLOR_PRIMARIO, "Referencia" = COLOR_BENCHMARK)) +
+  scale_y_continuous(limits = c(0, max(alcance_grafico$Valor) * 1.2)) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", color = COLOR_PRIMARIO, hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+g_familiar <- generar_familiar_plot() + labs(title = "Proporción Familiar")
+g_edad <- generar_edad_plot() + labs(title = "Antigüedad Promedio")
+
+grid.arrange(g_familiar, g_edad, ncol = 2)
+```
+```{r net-alcance-insights, echo=FALSE, results='asis'}
+# 1. Composición Familiar
+familiar_estado <- ifelse(val_familiares_pct > bench_familiares_pct, 'alto', 'saludable')
+familiar_accion <- ifelse(val_familiares_pct > bench_familiares_pct,
+                          'Se sugiere diversificar activamente para reducir el riesgo de redundancia informativa.',
+                          'El porcentaje permite un equilibrio entre confianza y acceso a información nueva.')
+cat(paste0('* **Composición Familiar:** Con un **', val_familiares_pct, '%** de lazos familiares (Benchmark: ', bench_familiares_pct, '%), el riesgo de **redundancia informativa** es **', familiar_estado, '**. ', familiar_accion, '\n'))
+
+# 2. Composición de Género (¡CORRECCIÓN APLICADA!)
+genero_estado <- ifelse(val_hombres_pct > 70 | val_mujeres_pct > 70, 'homogénea', 'diversa')
+genero_accion <- ifelse(genero_estado == 'homogénea',
+                        'Se recomienda buscar lazos del género subrepresentado para asegurar la diversidad de perspectivas.',
+                        paste0('La distribución de género (**Hombres: ', val_hombres_pct, '%, Mujeres: ', val_mujeres_pct, ' %**) es saludable, favoreciendo la variedad de enfoques.'))
+cat(paste0('* **Composición de Género:** Su red es relativamente **', genero_estado, '**. ', genero_accion, '\n'))
+
+# 3. Edad de los Lazos (Antigüedad)
+edad_accion <- ifelse(val_media_edad > bench_media_edad + bench_sd_edad,
+                      paste0('La antigüedad de los lazos (Media: **', val_media_edad, ' años**) es **alta**, lo que implica una red de **confianza profunda**, pero también riesgo de **obsolescencia** en la información.'),
+                      paste0('La antigüedad promedio de **', val_media_edad, ' años** indica una mezcla equilibrada de lazos nuevos y lazos de confianza a largo plazo.'))
+cat(paste0('* **Antigüedad de los Lazos:** ', edad_accion, '\n'))
+
+# 4. Alcance Geográfico
+geografico_dominante <- alcance_red %>% top_n(1, `Porcentaje (%)`) %>% pull(Alcance)
+cat(paste0('* **Alcance Geográfico:** El enfoque geográfico dominante es **', geografico_dominante, '**. Es crucial comparar su distribución con el benchmark para asegurar la apertura a oportunidades regionales e internacionales.\n'))
+```
+
+#### Círculos sociales
+El objetivo de esta sección es evaluar la diversidad estratégica de la red. Para ello, el análisis se centra exclusivamente en los roles de contacto adquiridos (lazos voluntarios), que son las fuentes principales de información de mercado, conocimiento externo y oportunidades de negocio.
+
+Por esta razón, excluimos los lazos familiares y la categoría 'Otros' del gráfico. La familia fue considerada previamente en la Composición de Red; aquí, buscamos entender la estructura de la red fuera del círculo íntimo y preestablecido.
+
+```{r net-social-circles, fig.height=6, fig.width=9, echo=FALSE, warning=FALSE}
+# ----------------------------------------------------------------------
+# 1. TRADUCCIÓN DE CONVENCIONES
+# ----------------------------------------------------------------------
+traduccion_circulos <- c(
+    "Neighbour" = "Vecino",
+    "Church" = "Iglesia",
+    "Education" = "Educación",
+    "Friend" = "Amigo",
+    "Military" = "Militar",
+    "Current Colleague" = "Colega Actual",
+    "Former Colleague" = "Colega Anterior",
+    "Business" = "Negocios"
+)
+
+# 2. Preparación de Datos: Seleccionar, agregar y traducir
+social_circles_data <- red_atributos %>%
+  select(
+    Neighbour, Church, Education, Friend, Military, 
+    `Current Colleague`, `Former Colleague`, Business
+  ) %>%
+  summarise_all(sum, na.rm = TRUE) %>%
+  pivot_longer(everything(), names_to = "Circulo_Social_ENG", values_to = "Conteo") %>%
+  # Aplicar la traducción
+  mutate(Circulo_Social = as.character(traduccion_circulos[Circulo_Social_ENG])) %>%
+  filter(Conteo > 0) %>%
+  mutate(Porcentaje = Conteo / sum(Conteo) * 100) %>%
+  mutate(Etiqueta = paste0(Circulo_Social, " (", round(Porcentaje, 1), "%)")) %>%
+  arrange(desc(Conteo)) # Ordenar por conteo descendente
+
+# 3. Generación de la Paleta de Colores SEGURA
+num_colores <- nrow(social_circles_data)
+colores_base <- c(COLOR_PRIMARIO, COLOR_BENCHMARK, COLOR_POSITIVO, COLOR_NEGATIVO)
+
+if (num_colores > 4) {
+  # Si se necesitan más de 4 colores, se añaden colores de viridis
+  colores_adicionales <- scales::viridis_pal()(num_colores - 4)
+  paleta_manual <- c(colores_base, colores_adicionales)[1:num_colores]
+} else {
+  # Si son 4 o menos, solo se usan los colores base
+  paleta_manual <- colores_base[1:num_colores]
+}
+# --------------------------------------------------
+
+
+# 4. Generación del Gráfico de Dona con Estilo Consistente
+plot_circles <- social_circles_data %>%
+  mutate(fraction = Conteo / sum(Conteo),
+         ymax = cumsum(fraction),
+         ymin = c(0, head(ymax, n=-1)),
+         label_position = (ymax + ymin) / 2) %>%
+  
+  ggplot(aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=Circulo_Social)) +
+  geom_rect() +
+  
+  # Etiquetas de porcentaje fuera del gráfico
+  geom_text(aes(x=4.2, y=label_position, label=paste0(round(Porcentaje, 1), "%")), 
+            size=3.5, fontface = "bold", color = "gray20") +
+  
+  # Leyendas con el nombre del círculo social
+  geom_text(aes(x=3.5, y=label_position, label=Circulo_Social), 
+            size=3.5, fontface = "bold", color = "white") +
+  
+  coord_polar(theta="y") +
+  xlim(c(2, 4.5)) +
+  
+  # Aplicar paleta de colores adaptada
+  scale_fill_manual(values = paleta_manual) +
+  
+  labs(
+    title = "Diversidad de la Red: Distribución de Lazos por Rol Social",
+    subtitle = "Métricas sobre el origen de los contactos",
+    fill = "Círculo Social"
+  ) +
+  theme_void(base_size = 12) +
+  theme(
+    # Estilo de título y subtítulo centrado y color primario
+    plot.title = element_text(hjust = 0.5, face = "bold", color = COLOR_PRIMARIO),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+
+print(plot_circles)
+```
+```{r net-insights-composition, echo=FALSE, results='asis'}
+# --- 4. Análisis Ejecutivo (Más Insights) ---
+
+# a) Identificar los dos círculos más dominantes
+top_circles <- social_circles_data %>%
+  slice(1:2)
+
+circulo_dominante_1 <- top_circles$Circulo_Social[1]
+pct_dominante_1 <- top_circles$Porcentaje[1]
+circulo_dominante_2 <- top_circles$Circulo_Social[2]
+pct_dominante_2 <- top_circles$Porcentaje[2]
+
+# b) Calcular la proporción profesional vs. personal
+# Nota: Lazos Profesionales aquí incluyen Negocios, Colegas Actuales y Anteriores
+lazos_profesionales_eng <- c("Business", "Current Colleague", "Former Colleague")
+conteo_profesional <- social_circles_data %>%
+  filter(Circulo_Social_ENG %in% lazos_profesionales_eng) %>%
+  summarise(total = sum(Conteo)) %>% pull(total)
+
+total_lazos <- sum(social_circles_data$Conteo)
+
+pct_profesional <- round((conteo_profesional / total_lazos) * 100, 1)
+pct_personal <- round(100 - pct_profesional, 1)
+
+# c) Conclusión sobre Dominancia
+if (pct_dominante_1 > 40) {
+  dominancia_concl <- paste0("Existe una alta **concentración de lazos** en el círculo de **", circulo_dominante_1, "** (", round(pct_dominante_1, 1), "%). Esto puede garantizar información especializada y soporte profundo en ese ámbito, pero sugiere una **necesidad estratégica de expansión deliberada** hacia otros roles para capturar conocimiento novedoso y diversificar perspectivas.")
+} else {
+  dominancia_concl <- paste0("La red muestra una **buena diversificación**, con el liderazgo repartido principalmente entre **", circulo_dominante_1, "** (", round(pct_dominante_1, 1), "%) y **", circulo_dominante_2, "** (", round(pct_dominante_2, 1), "%) . Esta estructura mitiga la dependencia de una única fuente de información y aumenta la **resiliencia estratégica** de la red.")
+}
+
+# d) Conclusión sobre Balance (Profesional vs. Personal)
+balance_concl <- paste0("El balance entre los lazos de apoyo personal (Amigos, Vecinos, etc.) y los lazos profesionales (Negocios, Colegas) es de **", pct_profesional, "% (Profesional) vs. ", pct_personal, "% (Personal)**. Si el enfoque estratégico es el **crecimiento de mercado o la expansión de capital**, mantener una proporción significativa de lazos profesionales es clave, ya que son los que típicamente traen **oportunidades de negocio y acceso a recursos estratégicos**.")
+
+
+# Presentación de los Hallazgos
+cat('\n#### Hallazgos clave (Composición de la Red)\n\n')
+cat(paste0('* **Concentración de lazos:** ', dominancia_concl, '\n'))
+cat(paste0('* **Balance Estratégico:** ', balance_concl, '\n'))
+```
+
+### Fuerza de los lazos
+```{r lazos-fuerza-narrativa, results='asis', echo=FALSE}
+cat("\n#### Características y Consecuencias de la Fuerza de los Lazos\n\n")
+
+cat("* **Lazos Fuertes (Alta Confianza):** Son relaciones que trascienden lo transaccional (ej. amistad).\n")
+cat("    * **Ventajas Estratégicas:** Se economiza **tiempo y esfuerzo** al tratar con personas de confianza; facilita la **colaboración profunda** más allá de lo pactado; permite obtener información de **fuentes altamente fidedignas** (reducción de incertidumbre).\n")
+cat("    * **Riesgos Clave:** Existe riesgo de **pérdida de flexibilidad** y desarrollo de **dependencia funcional**; limita la exploración de nuevas oportunidades externas; la información que se recibe puede ser **redundante** (riesgo de *groupthink*).\n\n")
+
+cat("* **Lazos Débiles (Transaccionales/Ocasionales):** Son relaciones puramente funcionales o casuales.\n")
+cat("    * **Ventajas Estratégicas:** Son el principal canal para obtener **información no redundante** (ideas innovadoras); aumentan la **flexibilidad** y permiten la **exploración de oportunidades** más allá del círculo inmediato; ofrecen un **mayor alcance** para la mediación de recursos.\n")
+cat("    * **Riesgos Clave:** Requieren mayor **tiempo y esfuerzo** para coordinar la acción; el nivel de **confianza y cooperación** es inherentemente más bajo que con lazos fuertes.\n")
+```
+### Análisis de la estructura y atributos de la red ego
+#### Género y cercanía
+```{r network-gender, echo=FALSE, warning=FALSE, message=FALSE, fig.height=8, fig.width=8, out.width="100%"}
+suppressPackageStartupMessages({
+library(readxl); library(dplyr); library(tidyr)
+library(igraph); library(scales); library(stringr); library(tibble)
+})
+
+# =========================== 0) CONFIGURACIÓN ================================
+workbook_path <- params$data_file
+attributes_sheet <- "Attributes"
+network_sheet <- "Network"
+
+alter_col <- "Tie"
+close_col <- "Closeness"
+tie_min <- 1
+
+# Paletas
+gender_palette <- c(
+"Masculino" = "#2E86AB", # Azul
+"Femenino" = "#C94C4C", # Rojo
+"Otro/NA" = "#95A5A6" # Gris
+)
+
+edge_palette <- c("#d0e3f0", "#5a7da0", "#1b3b5f")
+ego_fill <- "#ffec99"
+alter_fill <- "#e9ecef"
+
+ego_id <- "Ego"
+edge_curvature <- 0.10
+plot_size_px <- 2000
+plot_res_dpi <- 220 
+
+# Grosores / estilos
+tie_strength_mode <- "bin12_34"
+tie_strength_range <- c(2.5, 8)
+weak_tie_threshold <- 2
+bin_low_color <- "#CCCCCC" 
+bin_high_color <- "#CCCCCC" 
+weak_color_new <- "#CCCCCC"
+bin_low_width <- 3.5
+bin_high_width <- 8.5
+
+close_range <- c(2, 10) 
+clip_high_quantile <- 0.98
+
+# ======================= 1) LECTURA DE ATTRIBUTES ============================
+A <- read_excel(workbook_path, sheet = attributes_sheet)
+ego_df_raw <- A %>% filter(!is.na(.data[[alter_col]]), .data[[alter_col]] != "")
+if (nrow(ego_df_raw) == 0) stop("No alters encontrados en Attributes.")
+
+# ==================== 2) LECTURA + LIMPIEZA DE NETWORK ======================
+N_raw <- read_excel(workbook_path, sheet = network_sheet)
+first_col <- N_raw[[1]]
+first_col_is_label <- !all(suppressWarnings(is.na(as.numeric(first_col)))) &&
+(sum(!is.na(suppressWarnings(as.numeric(first_col)))) < length(first_col))
+if (first_col_is_label) {
+row_labels <- as.character(first_col); N_raw <- N_raw[, -1, drop = FALSE]
+} else row_labels <- NULL
+
+N_num <- N_raw %>% mutate(across(everything(), ~ suppressWarnings(as.numeric(.x)))) %>% as.matrix()
+col_labels <- colnames(N_raw)
+alters_all <- unique(as.character(ego_df_raw[[alter_col]]))
+row_ok <- !is.null(row_labels) && length(intersect(row_labels, alters_all)) >= 2
+col_ok <- !is.null(col_labels) && length(intersect(col_labels, alters_all)) >= 2
+
+if (row_ok && col_ok) {
+ common <- intersect(intersect(row_labels, col_labels), alters_all)
+ if (length(common) < 2) stop("Muy pocos nombres en común.")
+ N <- N_num[match(common, row_labels), match(common, col_labels), drop = FALSE]
+ alters <- common
+} else {
+ n_mat <- min(nrow(N_num), ncol(N_num), length(alters_all))
+ if (n_mat < 2) stop("Matriz de Network muy pequeña o no alineable.")
+ N <- N_num[seq_len(n_mat), seq_len(n_mat), drop = FALSE]
+ alters <- alters_all[seq_len(n_mat)]
+}
+ego_df <- ego_df_raw %>% filter(.data[[alter_col]] %in% alters)
+
+# ===================== 3) EDGES (alter–alter + ego–alter) ====================
+if (!is.null(clip_high_quantile) && clip_high_quantile > 0 && clip_high_quantile < 1) {
+ hi <- quantile(as.vector(N), probs = clip_high_quantile, na.rm = TRUE); N <- pmin(N, hi)
+}
+idx <- which(upper.tri(N) & !is.na(N) & N >= tie_min, arr.ind = TRUE)
+tie_df <- tibble(
+ from = alters[idx[, "row"]],
+ to = alters[idx[, "col"]],
+ weight = N[cbind(idx[, "row"], idx[, "col"])],
+ edge_type = "alter_alter"
+)
+edges_ego <- tibble(from = ego_id, to = alters, weight = NA_real_, edge_type = "ego_alter")
+edges_all <- bind_rows(edges_ego, tie_df)
+
+# =========================== 4) VERTICES =====================================
+all_nodes <- unique(c(edges_all$from, edges_all$to))
+vertices <- tibble(
+name = all_nodes,
+label = ifelse(all_nodes == ego_id, "Usted", all_nodes),
+node_type = ifelse(all_nodes == ego_id, "ego", "alter")
+)
+
+# =========================== 5) GRAFO ========================================
+g <- graph_from_data_frame(edges_all, vertices = vertices, directed = FALSE)
+
+# ===== 6) ATRIBUTOS: CLOSENESS (para grosor) y GÉNERO (para color) =======
+close_vals <- suppressWarnings(as.numeric(ego_df[[close_col]]))
+close_vec <- rep(NA_real_, vcount(g))
+m_idx <- match(as.character(ego_df[[alter_col]]), V(g)$name)
+close_vec[m_idx[!is.na(m_idx)]] <- close_vals[!is.na(m_idx)]
+g <- set_vertex_attr(g, "closeness_attr", value = close_vec)
+
+gender_raw <- ego_df[["Gender"]]
+to_label_gender <- function(x) {
+ xs <- as.character(x)
+ case_when(
+ xs %in% c("1", 1) ~ "Masculino",
+ xs %in% c("2", 2) ~ "Femenino",
+ TRUE ~ "Otro/NA"
+ )
+}
+gender_labels <- to_label_gender(gender_raw)
+gender_vec <- rep("Otro/NA", vcount(g))
+gender_vec[m_idx[!is.na(m_idx)]] <- gender_labels[!is.na(m_idx)]
+gender_vec[V(g)$name == ego_id] <- "Otro/NA"
+g <- set_vertex_attr(g, "gender_cat", value = gender_vec)
+
+# =================== 7) LAYOUT ==============================================
+edge_weights <- E(g)$weight
+med_w <- suppressWarnings(median(edge_weights, na.rm = TRUE)); if (!is.finite(med_w)) med_w <- 1
+edge_weights[is.na(edge_weights)] <- med_w
+layout_coords <- layout_with_fr(g, weights = edge_weights + 1e-6)
+
+# =================== 8) NODOS (color por GÉNERO) =========================
+node_type <- V(g)$node_type
+V(g)$label <- V(g)$label
+V(g)$label.color <- "#2b2b2b"
+V(g)$frame.color <- ifelse(node_type == "ego", "#6c757d", "#b0b0b0")
+V(g)$size <- ifelse(node_type == "ego", 36, 22)
+
+node_colors <- rep(alter_fill, vcount(g))
+node_colors[node_type == "ego"] <- ego_fill
+for (i in which(node_type == "alter")) {
+ cat_i <- V(g)$gender_cat[i]
+ if (cat_i %in% names(gender_palette)) node_colors[i] <- gender_palette[cat_i]
+}
+V(g)$color <- node_colors
+
+# =================== 9) ARISTAS (FUERZA Y CERCANÍA DEFINITIVAS) =============
+edge_types <- E(g)$edge_type
+tie_vals <- E(g)$weight
+is_ego_edge <- edge_types == "ego_alter"
+
+# 1. ESTILO BASE para lazos Alter-Alter (TIE STRENGTH): Fondo Gris
+E(g)$color <- "#CCCCCC" 
+E(g)$width <- bin_low_width * 0.4 
+E(g)$lty <- 3 
+
+idx_w_all <- which(!is_ego_edge & !is.na(tie_vals))
+if (length(idx_w_all) > 0) {
+ tv <- tie_vals[idx_w_all]
+ is_strong <- tv >= 3
+ E(g)$lty[idx_w_all][is_strong] <- 1
+}
+
+# 2. Lazos Ego–alter (CLOSENESS): Grosor ~ Closeness y color NEGRO
+ego_edge_idx <- which(is_ego_edge)
+if (length(ego_edge_idx) > 0) {
+ ea <- ends(g, ego_edge_idx)
+ alter_names <- ifelse(ea[,1] == ego_id, ea[,2], ea[,1])
+ alter_close <- V(g)$closeness_attr[match(alter_names, V(g)$name)]
+ cl_range <- range(alter_close[is.finite(alter_close)], finite = TRUE)
+ 
+ if (is.finite(cl_range[1]) && diff(cl_range) > 0) {
+ widths_ego <- rescale(alter_close, to = close_range, from = cl_range)
+ widths_ego[!is.finite(widths_ego)] <- mean(close_range)
+ E(g)$width[ego_edge_idx] <- widths_ego
+ } else E(g)$width[ego_edge_idx] <- mean(close_range)
+
+ E(g)$color[ego_edge_idx] <- "black" 
+ E(g)$lty[ego_edge_idx] <- 1 
+}
+
+# ==================== 10) DIBUJO Y VISUALIZACIÓN EN REPORTE ===============================
+par(mar = c(3,1,3,1), bg = "white")
+plot(g, layout = layout_coords, vertex.frame.width = 2.5, edge.curved = edge_curvature, main = "", asp = 0)
+
+title(main = "Distribución de género y cercanía en la red personal",
+ cex.main = 1.4, col.main = "#1a1a1a", font.main = 2, line = 0.5)
+
+# Panel guía (Top Left - Compacto)
+legend("topleft",
+legend = c("Codificación Visual", "", "Color del Nodo → Género",
+ "Grosor Ego-Alter → Cercanía",
+ "Grosor Alter-Alter → Fuerza del Lazo"),
+bty="o", box.col="#d0d0d0", box.lwd=1.5, bg="#fafafa",
+cex=.80, text.col=c("#1a1a1a","#1a1a1a","#4a4a4a","#4a4a4a","#4a4a4a"),
+text.font=c(2,1,1,1,1), inset=.02)
+
+# LEYENDA GÉNERO (Bottom Left)
+gender_present <- unique(V(g)$gender_cat[V(g)$node_type=="alter"])
+gender_present <- gender_present[gender_present!="Otro/NA"]
+if (length(gender_present) > 0) {
+ legend("bottomleft",
+ legend = gender_present,
+ fill = gender_palette[gender_present],
+border = "#808080",
+bty="o", box.col="#d0d0d0", box.lwd=1.5, bg="#fafafa",
+title="Género", title.col="#1a1a1a", title.font=2,
+cex=.85, text.col="#4a4a4a", inset=.02)
+}
+
+# Leyenda Closeness (Top Right)
+cl_vals <- V(g)$closeness_attr[V(g)$node_type=="alter"]
+cl_vals <- cl_vals[is.finite(cl_vals)]
+if (length(cl_vals) > 0) {
+ cl_q <- unique(c(min(cl_vals), median(cl_vals), max(cl_vals)))
+ cl_w <- rescale(cl_q, to = close_range, from = range(cl_vals, finite = TRUE))
+ 
+legend("topright",
+legend = paste0(round(cl_q, 1)),
+lwd = cl_w, col = "black", lty = 1, seg.len = 3,
+bty="o", box.col="#d0d0d0", box.lwd=1.5, bg="#fafafa",
+title="Cercanía", title.col="#1a1a1a", title.font=2,
+cex=.85, text.col="#4a4a4a", inset=.02)
+}
+
+# Leyenda Tie strength (Bottom Right)
+if (tie_strength_mode == "bin12_34") {
+legend("bottomright",
+legend = c("Débil (1-2)", "Fuerte (3-4)"),
+col = c("#CCCCCC", bin_high_color), 
+lty = c(3, 1), 
+lwd = c(bin_low_width * 0.4, bin_high_width * 0.8),
+seg.len = 3,
+bty="o", box.col="#d0d0d0", box.lwd=1.5, bg="#fafafa",
+title="Fuerza del Lazo", title.col="#1a1a1a", title.font=2,
+cex=.85, text.col="#4a4a4a", inset=.02)
+}
+```
+
+#### Análisis e Interpretación del gráfico de red ego
+```{r visual-analysis, echo=FALSE, results='asis'}
+cat("El mapa visual de la red ego proporciona una instantánea de la **estructura** y los **atributos** de los contactos más cercanos. El análisis se centra en la interpretación de los elementos visuales:\n\n")
+
+cat("#### 1. Composición de la red por género (color del nodo)\n")
+cat("La distribución de género de los **Alter (contactos)** se codifica por color (azul: **Masculino**, rojo: **Femenino**).\n\n")
+cat("<ul>\n")
+cat("<li>**Diversidad:** La presencia de varios colores sugiere una red con cierta **diversidad de género**.</li>\n")
+cat("<li>**Dominancia:** Se debe identificar si un color predomina en el gráfico, indicando que la mayoría de los contactos son de ese género o viceversa.</li>\n")
+cat("</ul>\n\n")
+
+cat("#### 2. Cercanía y vínculo con el ego (grosor del lazo negro)\n")
+cat("La **Cercanía** (Closeness) se representa con el **grosor de los lazos negros** que conectan a **Usted (Ego)** con cada contacto.\n\n")
+cat("<ul>\n")
+cat("<li>**Vínculos Fuertes:** Los lazos negros **más gruesos** indican los contactos con los que el Ego reporta el **mayor nivel de cercanía** (valores de Closeness más altos). Estos son los vínculos más fuertes y de mayor confianza.</li>\n")
+cat("<li>**Vínculos Débiles:** Los lazos negros **más delgados** representan contactos con niveles de **cercanía más bajos**.</li>\n")
+cat("</ul>\n\n")
+
+cat("#### 3. Cohesión y Fuerza de los Lazos Alter-Alter (lazos grises)\n")
+cat("El patrón de conexión entre los Alter (los lazos grises) revela la **cohesión interna** y el **capital social indirecto** del Ego.\n\n")
+cat("<ul>\n")
+cat("<li>**Cohesión (Triángulos):** La presencia de **triángulos** y lazos Alter-Alter indica que los contactos de la red se **conocen entre sí** (alta densidad local). Una alta cohesión facilita el apoyo mutuo, pero puede llevar a la redundancia de información.</li>\n")
+cat("<li>**Fuerza de los lazos (Convención Invertida):**\n")
+cat(" <ul>\n")
+cat(" <li>**Lazos débiles (Gris Claro, Grueso, Punteado):** Representan lazos de valor **1 o 2** en la matriz de red. Son visualmente prominentes para contrastar con los lazos fuertes.</li>\n")
+cat(" <li>**Lazos fuertes (Gris Oscuro, Delgado, Sólido):** Representan los lazos de valor **3 o 4** (gran confianza o frecuencia de contacto). Si están presentes, algunos Alter comparten vínculos fuertes, contribuyendo a la solidez de la subestructura.</li>\n")
+cat(" </ul>\n")
+cat("</li>\n")
+cat("</ul>\n")
+```
+### Métricas de la red
+```{r net-metrics-calc, include=FALSE}
+# --- CONFIGURACIÓN DE ARCHIVO Y BENCHMARKS ---
+file_excel_name <- params$data_file
+n_lazos <- 0
+val_density <- NA
+val_constraint <- NA
+bench_density <- 0.35 
+bench_constraint <- 0.45 
+
+# --- CÁLCULO DE MÉTRICAS CON MANEJO DE ERRORES ---
+tryCatch({
+    # 1. Cargar Atributos
+    red_atributos <- read_excel(file_excel_name, sheet = "Attributes") %>% 
+        filter(!is.na(Tie))
+    n_lazos <- nrow(red_atributos)
+    
+    if (n_lazos == 0) stop("Error: Hoja 'Attributes' vacía o no encontrada.")
+    
+    # 2. Cargar Matriz de Adyacencia (Hoja 'Network')
+    red_adj_matrix_df <- read_excel(file_excel_name, sheet = "Network", col_names = FALSE)
+    
+    # Limpieza: Conversión a matriz numérica y NA a 0
+    red_adj_matrix <- red_adj_matrix_df %>% 
+        select_if(~!is.character(.x) | all(is.na(.x))) %>% 
+        as.matrix()
+    
+    red_adj_matrix <- matrix(as.numeric(red_adj_matrix), nrow = nrow(red_adj_matrix))
+    red_adj_matrix[is.na(red_adj_matrix)] <- 0
+    
+    # Recortar la matriz al tamaño de lazos (n x n) para evitar errores de dimensión
+    size <- min(nrow(red_adj_matrix), n_lazos)
+    if (size < 2) stop("Matriz insuficiente.")
+    red_adj_matrix <- red_adj_matrix[1:size, 1:size]
+    
+    # 3. Creación del objeto igraph y Cálculo
+    g <- graph_from_adjacency_matrix(red_adj_matrix, mode = "undirected", diag = FALSE, weighted = TRUE)
+    
+    val_density <- round(edge_density(g), 3)
+    val_constraints_vector <- constraint(g, nodes = V(g), weights = E(g)$weight)
+    val_constraint <- round(mean(val_constraints_vector, na.rm = TRUE), 3)
+
+}, error = function(e) {
+    message(paste("Fallo al leer las hojas de Excel:", e$message))
+    val_density <<- NA
+    val_constraint <<- NA
+})
+
+# --- Variables para la narrativa (Usando los valores calculados/fallback) ---
+# Densidad narrativa
+if (is.na(val_density)) {
+  density_estado <- "Indeterminada"
+  density_conclusion <- "No se pudo calcular la densidad debido a un error de lectura de datos."
+} else {
+  density_estado <- ifelse(val_density > bench_density, "alta", "baja")
+  density_conclusion <- ifelse(val_density > bench_density, 
+                              "lo que sugiere que los miembros de su red se conocen y confían mutuamente en gran medida. Esto facilita la colaboración y el control normativo.",
+                              "lo que indica que sus contactos no interactúan frecuentemente entre ellos. Esto aumenta la probabilidad de que su red contenga **'Agujeros Estructurales'** que usted puede explotar.")
+}
+
+# Restricción narrativa
+if (is.na(val_constraint)) {
+  constraint_estado <- "Indeterminada"
+  constraint_narrativa <- "No se pudo calcular la restricción debido a un error de lectura de datos."
+  constraint_oportunidad <- "El análisis estratégico está incompleto."
+  tipo_red <- "No determinado (Fallo de Lectura)"
+} else {
+  constraint_estado <- ifelse(val_constraint < bench_constraint, "baja", "alta")
+  constraint_narrativa <- ifelse(val_constraint < bench_constraint, 
+                                 "La restricción baja es ideal para la **innovación**, el **aprendizaje** y el **éxito profesional**, ya que indica la presencia de Agujeros Estructurales.", 
+                                 "La restricción alta sugiere que los contactos de su red se conocen bien entre sí y, por lo tanto, la información que usted recibe es altamente redundante.")
+
+  constraint_oportunidad <- ifelse(val_constraint < bench_constraint, 
+                                   "Usted está en una posición estratégica para **conectar grupos no conectados** (Brokerage), lo que le da una ventaja en el acceso a información no redundante y la capacidad de mediar recursos.",
+                                   "Para reducir la restricción y fomentar la innovación, se recomienda **diversificar los lazos** con contactos que no se conocen entre sí.")
+
+  tipo_red <- case_when(
+      val_density > 0.5 & val_constraint > 0.5 ~ "Red Cerrada (Confianza/Redundancia)",
+      val_density <= 0.5 & val_constraint <= 0.5 ~ "Red Abierta (Innovación/Brokerage)",
+      TRUE ~ "Red Mixta o En Transición"
+  )
+}
+```
+```{r net-metrics-plot-comparative, echo=FALSE, fig.width=8, fig.height=4.5}
+# Preparar los datos para ggplot
+plot_data <- data.frame(
+    Métrica = factor(c("Densidad", "Restricción"), levels = c("Densidad", "Restricción")),
+    "Su_Red" = c(val_density, val_constraint),
+    "Benchmark" = c(bench_density, bench_constraint)
+) %>%
+    pivot_longer(cols = c("Su_Red", "Benchmark"), names_to = "Fuente", values_to = "Valor")
+
+# Reordenar 'Fuente' para que 'Su Red' siempre esté primero
+plot_data$Fuente <- factor(plot_data$Fuente, levels = c("Su_Red", "Benchmark"))
+
+# Crear el gráfico de barras comparativo con énfasis en "Su Red"
+ggplot(plot_data, aes(x = Métrica, y = Valor, fill = Fuente)) +
+    # Barras agrupadas
+    geom_bar(stat = "identity", 
+             position = position_dodge(width = 0.8), 
+             width = 0.7) +
+    # Etiquetas de valor en la parte superior
+    geom_text(aes(label = sprintf("%.3f", Valor)), 
+              position = position_dodge(width = 0.8), 
+              vjust = -0.5, size = 3.5, fontface = "bold") +
+    # Colores: Rojo/Azul para Su Red, Gris para Benchmark
+    scale_fill_manual(values = c("Su_Red" = "#0072B2", "Benchmark" = "#999999"), 
+                      labels = c("Usted", "Promedio Sectorial")) +
+    labs(title = "Comparativa de Métricas de Red: Posición de Usted vs. Sector",
+          y = "Puntuación", 
+          fill = "Referencia") +
+    theme_minimal() +
+    theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "bottom",
+        axis.title.x = element_blank()
+    )
+```
+```{r net-table-data, include=FALSE}
+# --- Función Auxiliar para Determinar el Estado de Color (Favorable/Precaución) ---
+get_estado_color <- function(metric_value, bench_value, type) {
+    if (is.na(metric_value)) return("N/A")
+    
+    # Densidad: ALTA es Favorable (Green)
+    if (type == "density") {
+        return(ifelse(metric_value >= bench_value, "Favorable", "Precaución"))
+    } 
+    # Restricción: BAJA es Favorable (Green)
+    else if (type == "constraint") {
+        return(ifelse(metric_value <= bench_value, "Favorable", "Precaución"))
+    }
+    return("N/A")
+}
+
+# --- Construcción de la Tabla Final ---
+tabla_final <- data.frame(
+    Indicador = c("Densidad", "Restricción"),
+    `Valor Empresa` = c(val_density, val_constraint),
+    `Promedio Saneado` = c(bench_density, bench_constraint),
+    Posición = c(
+        get_estado_color(val_density, bench_density, "density"),
+        get_estado_color(val_constraint, bench_constraint, "constraint")
+    )
+)
+```
+```{r net-dt-output, echo=FALSE}
+generar_tabla <- function() {
+    dt <- datatable(
+        tabla_final,
+        rownames = FALSE,
+        options = list(
+            dom = 't', 
+            paging = FALSE, 
+            autoWidth = TRUE, 
+            columnDefs = list(
+                list(width = '120px', targets = c(0, 3)),
+                list(className = 'dt-center', targets = '_all') # Centrar todas las columnas
+            )
+        ),
+        # Renombra las columnas para la visualización
+        colnames = c("Indicador", "Valor empresa", "Valor de referencia", "Estado de la Métrica")
+    ) %>%
+        # Aplica el estilo de color basado en Favorable/Precaución
+        formatStyle(
+            'Posición',
+            backgroundColor = styleEqual(
+                c("Favorable", "Precaución", "N/A"),
+                c('#c8e6c9', '#ffe0b2', '#f5f5f5') # Verde, Amarillo Suave, Gris
+            ),
+            fontWeight = 'bold'
+        ) %>%
+        formatRound(columns = c('Valor.Empresa', 'Promedio.Saneado'), digits = 3)
+    return(dt)
+}
+
+# --- Generación de la tabla final ---
+generar_tabla()
+```
+```{r net-densidad-analisis, echo=FALSE, results='asis'}
+# Verificar la existencia de la variable de estado para evitar errores
+if (exists("density_estado")) {
+    
+    # 1. Definición del Título y Resumen Dinámico
+    if (density_estado == 'alta') {
+        executive_summary_title <- "Alta Densidad (Cohesión y Control)"
+        executive_summary_text <- "Su red opera con una **Alta Densidad**, lo que indica una **interconexión significativa** entre sus contactos. Esta estructura maximiza la **confianza mutua**, facilita la **coordinación rápida** y asegura el control normativo interno. La principal fortaleza es la **estabilidad**. No obstante, esta cohesión conlleva un riesgo inherente de **redundancia informacional** y la formación de un **pensamiento de grupo** (*groupthink*), lo que puede limitar la exposición a perspectivas externas y la innovación."
+        
+    } else if (density_estado == 'baja') {
+        executive_summary_title <- "Baja Densidad (Flexibilidad y Diversidad)"
+        executive_summary_text <- "Su red presenta **Baja Densidad**, lo que sugiere una **estructura fragmentada** donde sus contactos tienen menos lazos mutuos. Esta configuración optimiza la **flexibilidad estructural** y le facilita el acceso a **información diversa y no redundante** (Brokerage). El desafío principal es la **coordinación**; la falta de interconexión puede dificultar la movilización rápida de recursos o la ejecución de proyectos que exijan un alto nivel de confianza y cooperación entre todos los actores."
+        
+    } else {
+        executive_summary_title <- "Densidad Indefinida"
+        executive_summary_text <- "La clasificación de Densidad no está disponible. Revise la ejecución del chunk de cálculo de métricas."
+    }
+    
+    # 2. Imprimir el Resumen Ejecutivo
+    cat("####", executive_summary_title, "\n\n")
+    cat(paste0(executive_summary_text, "\n\n---\n\n"))
+
+    # 3. Preparar y Imprimir la Leyenda como una Tabla Kable (Aparencia Profesional)
+    
+    # Crear el dataframe para la leyenda
+    legend_data <- data.frame(
+        Color = c("Azul", "Rojo", "Amarillo", "Verde"),
+        Centralidad = c("N/A", "Alta", "Moderada", "Baja"),
+        Implicacion = c(
+            "Usted (Ego)",
+            "Mayor Cohesión: Nodos con muchas conexiones. Su desconexión afectaría más la densidad.",
+            "Nodos promedio en términos de conexión.",
+            "Baja Cohesión: Nodos con pocas conexiones."
+        )
+    )
+}
+```
+```{r net-restriccion-analisis, echo=FALSE, results='asis'}
+cat("\n\n") 
+
+# Verificar la existencia de la variable de estado para evitar errores
+if (exists("constraint_estado")) {
+    
+    # 1. Definición del Título y Resumen Dinámico
+    if (constraint_estado == 'alta') {
+        executive_summary_title <- "Alta Restricción (Riesgo de Redundancia)"
+        executive_summary_text <- "Su red exhibe una **Alta Restricción**, lo que significa que sus contactos se conocen bien entre sí (**alta redundancia**). Esta estructura reduce su capacidad para actuar como un **Broker de Recursos** y limita el acceso a **información novedosa** u oportunidades únicas de mercado. El principal riesgo es la **falta de innovación** por exposición limitada a ideas externas. Su foco estratégico debe ser **reducir la redundancia** y **buscar Agujeros Estructurales**."
+        
+    } else if (constraint_estado == 'baja') {
+        executive_summary_title <- "Baja Restricción (Brokerage y Autonomía)"
+        executive_summary_text <- "Su red presenta **Baja Restricción**. Esto indica una **estructura de Brokerage** donde el Ego es capaz de conectar grupos que de otra manera estarían separados (**Agujeros Estructurales**). Esta configuración maximiza la **autonomía** y la **ventaja informativa**, permitiéndole acceder a **retornos no redundantes** (oportunidades únicas). Es una posición estructural óptima para la **innovación** y la **generación de valor**."
+        
+    } else {
+        executive_summary_title <- "Restricción Indefinida"
+        executive_summary_text <- "La clasificación de Restricción no está disponible. Revise la ejecución del chunk de cálculo de métricas."
+    }
+    
+    # 2. Imprimir el Título en negrita y el Resumen Ejecutivo (Usando <p> para formato limpio)
+    cat("####", executive_summary_title, "\n\n")
+    cat(paste0(executive_summary_text, "\n\n---\n\n"))
+}
+```
