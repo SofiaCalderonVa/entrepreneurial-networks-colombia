@@ -1,12 +1,11 @@
 # Entrepreneurial Social Networks & Violence in Colombia
-
-> Built as Research Assistant · Universidad de los Andes · Prof. Sebastián León Schorch PhD
+Built as Research Assistant · Universidad de los Andes · Prof. Sebastián León Schorch PhD
 
 ---
 
 ## Overview
 
-This project analyzes how violence and social mobility shape the structure of entrepreneurial networks across Colombian cities. I designed and built an end-to-end parameterized reporting system that combines ego-network analysis and financial benchmarking — generating individual strategic intelligence reports for each firm in a multi-city dataset.
+This project analyzes how violence and social mobility shape the structure of entrepreneurial networks across Colombian cities. I designed and built an end-to-end parameterized reporting system that combines ego-network analysis and financial benchmarking, generating individual strategic intelligence reports for each firm in a multi-city dataset.
 
 The system takes a company ID and city as inputs and automatically produces a fully tailored HTML report covering that firm's financial position and network structure, benchmarked against its sector.
 
@@ -67,7 +66,7 @@ And line ~51:
 emis_data_file <- "data/SAMPLE_EMIS_data.xlsx"
 ```
 
-Then knit — a full HTML report will be generated.
+Then knit: a full HTML report will be generated.
 
 **4. Run for a real company** *(your own data)*
 
@@ -109,9 +108,9 @@ emis_data_file <- "data/YOUR_CITY_EMIS_data.xlsx"
 
 | Concept | Description |
 |---|---|
-| Network density | Share of possible ties that exist — high = cohesion & trust |
-| Burt's constraint | How much ego's contacts know each other — low = brokerage advantage |
-| Structural holes | Gaps between unconnected groups — bridging them yields informational advantage |
+| Network density | Share of possible ties that exist |
+| Burt's constraint | How much ego's contacts know each other |
+| Structural holes | Gaps between unconnected groups |
 | Ego-network | Local network centered on a single firm and its direct contacts |
 
 ---
