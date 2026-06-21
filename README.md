@@ -34,14 +34,14 @@ entrepreneurial-networks-colombia/
 ## Quickstart
 
 **1. Clone the repo and open in RStudio**
-
+ 
 ```bash
 git clone https://github.com/SofiaCalderonVa/entrepreneurial-networks-colombia.git
 cd entrepreneurial-networks-colombia
 ```
-
+ 
 **2. Install required R packages**
-
+ 
 ```r
 install.packages(c(
   "readxl", "knitr", "dplyr", "tidyr", "readr", "tidyverse",
@@ -49,34 +49,28 @@ install.packages(c(
   "visNetwork", "kableExtra", "gridExtra"
 ))
 ```
-
-**3. Run with the synthetic sample data**
-
-Update the top of `Reporte_V1.Rmd`:
-
-```r
-params:
-  ego_id: "SAMPLE_EGO"
-  data_file: "data/PE601_SAMPLE.xlsx"
-```
-
-And line ~51:
-
-```r
-emis_data_file <- "data/SAMPLE_EMIS_data.xlsx"
-```
-
-Then knit: a full HTML report will be generated.
-
-**4. Run for a real company** *(your own data)*
-
+ 
+**3. Knit the report**
+ 
+The file is pre-configured to run on the synthetic sample data out of the box. Open `Reporte_V1.Rmd` in RStudio, set your working directory to the repo root, and hit **Knit**. A full HTML report for `EjemploEmpresa S.A.S.` will be generated.
+ 
+**4. Run for your own data**
+ 
+To adapt the report to a real company, update two parameters at the top of `Reporte_V1.Rmd`:
+ 
 ```r
 params:
   ego_id: "YOUR_COMPANY_ID"
   data_file: "data/YOUR_COMPANY.xlsx"
-
+```
+ 
+And one file path further down:
+ 
+```r
 emis_data_file <- "data/YOUR_CITY_EMIS_data.xlsx"
 ```
+ 
+See `data/README.md` for the expected file structure.
 
 ---
 
